@@ -1,24 +1,28 @@
 import time
 from mbot_bridge.api import MBot
 
+bot = MBot()
+
 SETPOINT = 0.50   # target distance (meters)
-MARGIN   = 0.05   # allowable error
+MARGIN   = 0.05   # how close is “close enough”
 V_FWD    = 0.20   # forward speed
 V_BACK   = -0.15  # backward speed
-DT       = 0.05   # loop delay (seconds)
-
-bot = MBot()
+DT       = 0.05   # delay between checks (seconds)
 
 try:
     while True:
-        d = bot.get_front_distance_m()
-        if d > SETPOINT + MARGIN:
-            bot.drive(V_FWD, 0.0, 0.0)    # move forward
-        elif d < SETPOINT - MARGIN:
-            bot.drive(V_BACK, 0.0, 0.0)    # move backward
+        scan = bot.get_lidar_scan()          # get LiDAR data
+        ranges = scan["ranges"]              # list of distance readings
+        center = ranges[len(ranges)//2]      # middle value = front distance
+
+        if center > SETPOINT + MARGIN:
+            bot.drive(V_FWD, 0.0, 0.0)       # too far → move forward
+        elif center < SETPOINT - MARGIN:
+            bot.drive(V_BACK, 0.0, 0.0)      # too close → move backward
         else:
-            bot.stop()                     # stop when in range
+            bot.stop()                       # in range → stop
         time.sleep(DT)
+
 finally:
     bot.stop()
 
