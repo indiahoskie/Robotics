@@ -1,0 +1,24 @@
+import time
+from mbot_bridge.api import MBot
+
+SETPOINT = 0.50   # target distance (meters)
+MARGIN   = 0.05   # allowable error
+V_FWD    = 0.20   # forward speed
+V_BACK   = -0.15  # backward speed
+DT       = 0.05   # loop delay (seconds)
+
+bot = MBot()
+
+try:
+    while True:
+        d = bot.get_front_distance_m()
+        if d > SETPOINT + MARGIN:
+            bot.drive(V_FWD, 0.0, 0.0)    # move forward
+        elif d < SETPOINT - MARGIN:
+            bot.drive(V_BACK, 0.0, 0.0)    # move backward
+        else:
+            bot.stop()                     # stop when in range
+        time.sleep(DT)
+finally:
+    bot.stop()
+
