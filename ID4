@@ -1,0 +1,26 @@
+import time
+from mbot_bridge.api import MBot
+
+bot = MBot()
+
+try:
+    while True:
+        print("Moving forward...")
+        bot.drive(0.2, 0.0, 0.0)   # move forward
+        time.sleep(2)
+
+        print("Moving backward...")
+        bot.drive(-0.2, 0.0, 0.0)  # move backward
+        time.sleep(2)
+
+        print("Stopping.")
+        bot.stop()
+        time.sleep(1)
+        
+        print("Looping again...")   # optional message to show it’s still running
+
+except KeyboardInterrupt:
+    print("Stopped by user.")
+    bot.stop()
+finally:
+    bot.stop()
