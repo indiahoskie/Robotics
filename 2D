@@ -1,0 +1,29 @@
+import time
+from mbot_bridge.api import MBot
+
+bot = MBot()
+TARGET = 0.6  # desired distance (m)
+
+try:
+    while True:
+        dist = bot.get_range("front")  # front distance in meters
+        if dist is None:
+            bot.stop()
+            continue
+
+        # Too close → back up
+        if dist < TARGET - 0.1:
+            bot.drive(-0.1, 0, 0)
+        # Too far → move forward
+        elif dist > TARGET + 0.1:
+            bot.drive(0.2, 0, 0)
+        # Within range → stop
+        else:
+            bot.stop()
+
+        print(f"Front distance: {dist:.2f} m")
+        time.sleep(0.1)
+
+except KeyboardInterrupt:
+    bot.stop()
+    print("Stopped safely.")
