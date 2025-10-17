@@ -17,8 +17,7 @@ try:
         bot.stop()
         time.sleep(1)
         
-        print("Looping again...")   # optional message to show it’s still running
-
+        print("Looping again...")   
 except KeyboardInterrupt:
     print("Stopped by user.")
     bot.stop()
