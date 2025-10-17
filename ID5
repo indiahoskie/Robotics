@@ -3,27 +3,24 @@ from mbot_bridge.api import MBot
 
 bot = MBot()
 
-SETPOINT = 0.50   # desired distance from object (meters)
-MARGIN   = 0.05   # allowed error
-V_FWD    = 0.20   # forward speed
-V_BACK   = -0.15  # backward speed
-DT       = 0.05   # seconds between updates
+SETPOINT = 0.50
+MARGIN   = 0.05
+V_FWD    = 0.20
+V_BACK   = -0.15
+DT       = 0.05
 
 try:
     while True:
-        # Step 1: Get distance reading
-        # (adjust this to match your MBot’s available function)
-        distance = bot.get_range_front()  # get the current range in meters
+        distance = bot.get_range_front()
 
-        # Step 2: Compare distance to the setpoint
         if distance > SETPOINT + MARGIN:
-            bot.drive(V_FWD, 0.0, 0.0)    # too far → move forward
+            bot.drive(V_FWD, 0.0, 0.0)
             print(f"Too far ({distance:.2f} m) → moving forward")
         elif distance < SETPOINT - MARGIN:
-            bot.drive(V_BACK, 0.0, 0.0)    # too close → back up
+            bot.drive(V_BACK, 0.0, 0.0)
             print(f"Too close ({distance:.2f} m) → backing up")
         else:
-            bot.stop()                     # within range → stop
+            bot.stop()
             print(f"Within target range ({distance:.2f} m) → stopped")
 
         time.sleep(DT)
@@ -33,4 +30,3 @@ except KeyboardInterrupt:
     bot.stop()
 finally:
     bot.stop()
-
