@@ -1,19 +1,11 @@
-#!/usr/bin/env python3
-# Bang-Bang distance control that auto-detects common MBot APIs.
-# It keeps ~0.50 m from the object in front using simple on/off logic.
-
 import time, math
-
-# If your environment uses a different import, change this one line:
 from mbot_bridge.api import MBot
 
-# ---- Tunables ----
-SETPOINT = 0.50    # meters
-MARGIN   = 0.05    # +/- band
-V_FWD    = 0.20    # m/s
-V_BACK   = -0.15   # m/s
-DT       = 0.05    # seconds (20 Hz)
-# -------------------
+SETPOINT = 0.50
+MARGIN   = 0.05
+V_FWD    = 0.20
+V_BACK   = -0.15
+DT       = 0.05
 
 bot = MBot()
 
@@ -24,26 +16,14 @@ def _is_number(x):
         return False
 
 def _extract_ranges(scan_obj):
-    """
-    Normalize different scan formats to a Python list of distances.
-    Supports:
-      - dict with "ranges"
-      - object with .ranges
-      - plain list/tuple/array
-    Returns list[float] or None.
-    """
     if scan_obj is None:
         return None
-    # dict style
     if isinstance(scan_obj, dict) and "ranges" in scan_obj:
         return scan_obj["ranges"]
-    # object with attribute
     if hasattr(scan_obj, "ranges"):
         return getattr(scan_obj, "ranges")
-    # already a sequence
     if isinstance(scan_obj, (list, tuple)):
         return list(scan_obj)
-    # numpy array fallback without importing numpy
     if hasattr(scan_obj, "__iter__"):
         try:
             return list(scan_obj)
@@ -60,40 +40,15 @@ def _center_distance_from_any_scan(scan_obj):
     return float(val) if _is_number(val) and val > 0 else float("nan")
 
 def get_front_distance_m():
-    """
-    Try several common APIs in order:
-      1) direct front-distance methods
-      2) scan methods + center ray
-    Returns distance in meters (float), or NaN if unavailable.
-    """
-    # 1) Direct distance methods
-    direct_names = (
-        "get_front_distance_m",
-        "get_front_range",
-        "front_distance",
-        "front_range",
-    )
-    for name in direct_names:
+    for name in ("get_front_distance_m", "get_front_range", "front_distance", "front_range"):
         if hasattr(bot, name):
             try:
                 d = getattr(bot, name)()
                 return float(d) if _is_number(d) and d > 0 else float("nan")
             except Exception:
                 pass
-
-    # 2) Scan methods (take center reading)
-    scan_names = (
-        "get_lidar_scan",
-        "get_scan",
-        "lidar_scan",
-        "get_laser_scan",
-        "laser_scan",
-        "lidar",
-        "read_lidar",
-        "get_ranges",   # sometimes returns the ranges directly
-        "ranges",       # sometimes a method
-    )
-    for name in scan_names:
+    for name in ("get_lidar_scan", "get_scan", "lidar_scan", "get_laser_scan", "laser_scan",
+                 "lidar", "read_lidar", "get_ranges", "ranges"):
         if hasattr(bot, name):
             try:
                 candidate = getattr(bot, name)
@@ -103,24 +58,32 @@ def get_front_distance_m():
                     return d
             except Exception:
                 pass
-
-    # If nothing worked, return NaN so the controller stops safely
     return float("nan")
 
 try:
+    print("Controller started. Target = %.2fm ± %.2fm" % (SETPOINT, MARGIN))
+    lost = 0
     while True:
         d = get_front_distance_m()
-
         if not math.isfinite(d):
-            bot.stop()  # no valid reading → safest is stop
-        elif d > SETPOINT + MARGIN:
-            bot.drive(V_FWD, 0.0, 0.0)   # too far → forward
-        elif d < SETPOINT - MARGIN:
-            bot.drive(V_BACK, 0.0, 0.0)  # too close → back
+            lost += 1
+            bot.stop()
+            if lost % int(1/DT) == 0:
+                print("No valid distance reading. Stopped (lost=%d)" % lost)
         else:
-            bot.stop()                   # in band → stop
-
+            lost = 0
+            if d > SETPOINT + MARGIN:
+                bot.drive(V_FWD, 0.0, 0.0)
+                print("Too far (%.2fm) → moving forward" % d)
+            elif d < SETPOINT - MARGIN:
+                bot.drive(V_BACK, 0.0, 0.0)
+                print("Too close (%.2fm) → moving back" % d)
+            else:
+                bot.stop()
+                print("In band (%.2fm) → stop" % d)
         time.sleep(DT)
-
+except KeyboardInterrupt:
+    print("KeyboardInterrupt → stopping.")
 finally:
     bot.stop()
+    print("Stopped safely.")
