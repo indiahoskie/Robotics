@@ -1,160 +1,114 @@
-import time
-import inspect
+import time, inspect
 from mbot_bridge.api import MBot
 
-# ------------------------ TUNABLES ------------------------
-STOP_DISTANCE = 0.25     # meters; stop if obstacle closer than this
-FORWARD_SPEED = 0.25     # m/s forward (linear x)
-REVERSE_SPEED = -0.20    # m/s reverse
-TURN_RATE = 1.2          # rad/s yaw (positive = left in most APIs)
-LOOP_HZ = 10             # control loop frequency
-REVERSE_TIME = 0.7       # seconds to back up
-TURN_TIME = 0.8          # seconds to turn
-# ---------------------------------------------------------
+# =============== CONFIG YOU SET ===============
+RANGE_PATH  = "front_range_m"   # e.g., "front_range_m" or "sensors.ultrasonic.front_cm"
+RANGE_UNITS = "m"               # "m" or "cm"
+# =============================================
+
+STOP_DISTANCE = 0.25
+FORWARD_SPEED = 0.25
+REVERSE_SPEED = -0.20
+TURN_RATE     = 1.2
+LOOP_HZ       = 10
+REVERSE_TIME  = 0.7
+TURN_TIME     = 0.8
 
 bot = MBot()
 
-# --- Motion adapter (supports drive(vx, vy, wz), drive(vx, wz), or motors(v_l, v_r)) ---
+# ---- Drive adapter ----
 def _detect_drive_fn():
     if hasattr(bot, "drive"):
         sig = inspect.signature(bot.drive)
         n = len(sig.parameters)
         if n >= 3:
-            print("[INFO] Using drive(vx, vy, wz)")
-            def drive(vx=0, vy=0, wz=0):
-                try: bot.drive(vx, vy, wz)
-                except Exception as e: print(f"[ERR] drive(3): {e}")
-            return drive
+            print("[INFO] drive(vx,vy,wz)")
+            return lambda vx=0, vy=0, wz=0: bot.drive(vx, vy, wz)
         elif n == 2:
-            print("[INFO] Using drive(vx, wz)")
-            def drive(vx=0, vy_unused=0, wz=0):
-                try: bot.drive(vx, wz)
-                except Exception as e: print(f"[ERR] drive(2): {e}")
-            return drive
+            print("[INFO] drive(vx,wz)")
+            return lambda vx=0, vy_unused=0, wz=0: bot.drive(vx, wz)
     if hasattr(bot, "motors"):
-        print("[INFO] Using motors(v_l, v_r) fallback")
-        WHEEL_BASE = 0.16  # meters (adjust if needed)
+        print("[INFO] motors(v_l,v_r)")
+        WHEEL_BASE = 0.16
         def drive(vx=0, vy_unused=0, wz=0):
-            # Simple diff-drive conversion
             v_l = vx - (wz * WHEEL_BASE / 2.0)
             v_r = vx + (wz * WHEEL_BASE / 2.0)
-            try: bot.motors(v_l, v_r)
-            except Exception as e: print(f"[ERR] motors: {e}")
+            bot.motors(v_l, v_r)
         return drive
-    raise RuntimeError("No supported motion method found on MBot (drive or motors).")
-
-def _detect_stop_fn():
-    if hasattr(bot, "stop"):
-        def stop(): 
-            try: bot.stop()
-            except Exception as e: print(f"[ERR] stop(): {e}")
-        return stop
-    # Fallback: send zero motion via drive adapter
-    def stop():
-        try: DRIVE(0.0, 0.0, 0.0)
-        except Exception as e: print(f"[ERR] stop fallback: {e}")
-    return stop
+    raise RuntimeError("No drive method on MBot.")
 
 DRIVE = _detect_drive_fn()
-STOP = _detect_stop_fn()
+STOP  = (lambda : bot.stop()) if hasattr(bot, "stop") else (lambda : DRIVE(0,0,0))
 
-# --- Range adapter (tries common methods/keys, normalizes to meters) ---
-def _detect_range_fn():
-    # Method candidates in priority order: (callable, needs_arg, returns_cm)
-    candidates = [
-        ("get_range", True, False),
-        ("get_front_distance", False, False),
-        ("range_front", False, False),
-        ("read_ultrasonic", True, True),   # often returns cm
-    ]
-    for name, needs_arg, is_cm in candidates:
-        if hasattr(bot, name) and callable(getattr(bot, name)):
-            fn = getattr(bot, name)
-            try:
-                if needs_arg:
-                    val = fn("front")
-                else:
-                    val = fn()
+# ---- Generic dict key-path reader ----
+def _get_by_path(root, path):
+    cur = root
+    for p in path.split("."):
+        if isinstance(cur, dict):
+            cur = cur.get(p, None)
+        else:
+            cur = getattr(cur, p, None)
+        if cur is None:
+            return None
+    return cur
+
+def _maybe_call(x):
+    try:
+        return x() if callable(x) and x.__code__.co_argcount == 0 else x
+    except Exception:
+        return x
+
+def read_distance_m():
+    """
+    Tries dict/state calls first; then attribute path. Converts units.
+    """
+    # First: if RANGE_PATH can be resolved through sensor/state methods:
+    for dm in ("get_sensors", "read_sensors", "get_state", "read_state"):
+        fn = getattr(bot, dm, None)
+        if callable(fn):
+            d = fn()
+            if isinstance(d, dict):
+                val = _get_by_path(d, RANGE_PATH)
                 if val is not None:
-                    meters = (val / 100.0) if is_cm else float(val)
-                    print(f"[INFO] Using {name}{'(cm)' if is_cm else ''}; first read = {meters:.3f} m")
-                    def reader():
-                        try:
-                            v = fn("front") if needs_arg else fn()
-                            return None if v is None else ((v/100.0) if is_cm else float(v))
-                        except Exception:
-                            return None
-                    return reader
-            except Exception:
-                pass
+                    try:
+                        f = float(_maybe_call(val))
+                        return f/100.0 if RANGE_UNITS == "cm" else f
+                    except Exception:
+                        pass
+    # Second: try direct attribute path on bot
+    val = _get_by_path(bot, RANGE_PATH)
+    if val is not None:
+        try:
+            f = float(_maybe_call(val))
+            return f/100.0 if RANGE_UNITS == "cm" else f
+        except Exception:
+            return None
+    return None
 
-    # Try a sensor-dict method
-    dict_methods = ["get_sensors", "read_sensors", "get_state", "read_state"]
-    dict_keys = ["front_range_m", "front_distance_m", "range_front_m", "front_range", "range"]
-
-    for dm in dict_methods:
-        if hasattr(bot, dm) and callable(getattr(bot, dm)):
-            fn = getattr(bot, dm)
-            try:
-                d = fn()
-                if isinstance(d, dict):
-                    for k in dict_keys:
-                        if k in d:
-                            try:
-                                meters = float(d[k])
-                                print(f"[INFO] Using {dm}()['{k}'] ; first read = {meters:.3f} m")
-                                def reader():
-                                    try:
-                                        dd = fn()
-                                        if not isinstance(dd, dict): return None
-                                        v = dd.get(k, None)
-                                        return None if v is None else float(v)
-                                    except Exception:
-                                        return None
-                                return reader
-                            except Exception:
-                                continue
-            except Exception:
-                pass
-
-    raise RuntimeError("No supported front distance method found on MBot.")
-
-RANGE = _detect_range_fn()
-
-# --- Control loop ---
-def avoid_obstacle():
-    print("[AVOID] Obstacle detected. Stopping.")
+def avoid():
+    print("[AVOID] stop → reverse → turn")
     STOP()
     time.sleep(0.05)
-    print("[AVOID] Reversing...")
-    DRIVE(REVERSE_SPEED, 0.0, 0.0)
-    time.sleep(REVERSE_TIME)
-    STOP()
-    time.sleep(0.05)
-    print("[AVOID] Turning...")
-    DRIVE(0.0, 0.0, TURN_RATE)
-    time.sleep(TURN_TIME)
-    STOP()
-    time.sleep(0.05)
-    print("[AVOID] Done. Resuming forward.")
+    DRIVE(REVERSE_SPEED, 0.0, 0.0); time.sleep(REVERSE_TIME)
+    STOP(); time.sleep(0.05)
+    DRIVE(0.0, 0.0, TURN_RATE); time.sleep(TURN_TIME)
+    STOP(); time.sleep(0.05)
 
 def main():
-    print("Starting obstacle-aware drive. Press Ctrl+C to stop.")
-    period = 1.0 / LOOP_HZ
+    period = 1.0/LOOP_HZ
+    print(f"[INFO] Using RANGE_PATH='{RANGE_PATH}' units={RANGE_UNITS}")
     while True:
         t0 = time.time()
-        dist = RANGE()
+        dist = read_distance_m()
         if dist is None:
-            print("[WARN] No distance reading; stopping for safety.")
+            print("[WARN] no distance value; stopping")
             STOP()
         else:
-            print(f"[INFO] Front distance: {dist:.3f} m")
+            print(f"[RANGE] {dist:.3f} m")
             if dist < STOP_DISTANCE:
-                avoid_obstacle()
+                avoid()
             else:
                 DRIVE(FORWARD_SPEED, 0.0, 0.0)
-
-        # keep loop timing stable
         dt = time.time() - t0
         if dt < period:
             time.sleep(period - dt)
@@ -166,3 +120,4 @@ except KeyboardInterrupt:
 finally:
     STOP()
     print("Robot halted.")
+
