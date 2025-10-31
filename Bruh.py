@@ -1,95 +1,50 @@
-#!/usr/bin/env python3
-"""
-Improved Follow Me 1D Script
-Maintains a setpoint distance from an object using lidar.
-"""
-
 import time
 import numpy as np
-import sys
 from mbot_bridge.api import MBot
 
-# Constants
-SETPOINT = 0.25      # Desired distance from object (meters)
-TOLERANCE = 0.05     # Acceptable range around setpoint (meters)
-FORWARD_SPEED = 0.3  # Forward speed (m/s)
-BACKWARD_SPEED = -0.3  # Backward speed (m/s)
+# Get distance to wall
+def find_fwd_dist(ranges, thetas, window=5):
+    """Find the distance to the nearest object in front of the robot."""
+    fwd_ranges = np.array(ranges[:window] + ranges[-window:])
+    fwd_thetas = np.array(thetas[:window] + thetas[-window:])
+    valid_idx = (fwd_ranges > 0).nonzero()
+    fwd_ranges = fwd_ranges[valid_idx]
+    fwd_thetas = fwd_thetas[valid_idx]
+    fwd_dists = fwd_ranges * np.cos(fwd_thetas)
+    return np.mean(fwd_dists) if len(fwd_dists) > 0 else None
 
-def get_front_range_m(ranges, thetas):
-    """
-    Get average front-facing lidar distance using ±15° window.
-    """
-    if not ranges or not thetas or len(ranges) != len(thetas):
-        return None
+# Initialize robot
+robot = MBot()
 
-    # Convert to numpy arrays
-    ranges = np.array(ranges)
-    thetas = np.array(thetas)
+# Bang-Bang Controller Parameters
+SETPOINT = 1.0         # Desired distance to wall (meters)
+TOLERANCE = 0.1        # Acceptable margin (meters)
+FORWARD_SPEED = 0.3    # Forward velocity (m/s)
+BACKWARD_SPEED = -0.3  # Backward velocity (m/s)
 
-    # Filter for angles within ±15° (≈0.26 rad)
-    angle_window = 0.26
-    mask = np.abs(thetas) < angle_window
-    front_ranges = ranges[mask]
-    front_thetas = thetas[mask]
-
-    # Filter out invalid readings
-    valid = front_ranges > 0.05  # ignore zero or very small readings
-    front_ranges = front_ranges[valid]
-    front_thetas = front_thetas[valid]
-
-    if len(front_ranges) == 0:
-        return None
-
-    # Project distances forward
-    forward_distances = front_ranges * np.cos(front_thetas)
-    return np.mean(forward_distances)
-
-def follow_wall_loop(robot):
-    """
-    Main control loop to maintain setpoint distance using lidar.
-    """
+try:
     while True:
         ranges, thetas = robot.read_lidar()
-        dist = get_front_range_m(ranges, thetas)
+        dist_to_wall = find_fwd_dist(ranges, thetas)
 
-        if dist is None:
+        if dist_to_wall is None:
             print("No valid lidar data. Stopping.")
             robot.stop()
             time.sleep(0.2)
             continue
 
-        print(f"Front distance: {dist:.2f} m")
+        print(f"Distance to wall: {dist_to_wall:.2f} m")
 
-        if dist < SETPOINT - TOLERANCE:
+        # Bang-Bang Control Logic
+        if dist_to_wall < SETPOINT - TOLERANCE:
             robot.drive(BACKWARD_SPEED, 0.0, 0.0)
-        elif dist > SETPOINT + TOLERANCE:
+        elif dist_to_wall > SETPOINT + TOLERANCE:
             robot.drive(FORWARD_SPEED, 0.0, 0.0)
         else:
             robot.stop()
 
         time.sleep(0.1)
 
-def main():
-    """Initialize and run the controller."""
-    robot = None
-    try:
-        print("Connecting to mbot...")
-        robot = MBot()
-        time.sleep(1)
-        print("Starting follow 1D controller...")
-        follow_wall_loop(robot)
-    except KeyboardInterrupt:
-        print("\nStopping robot...")
-        if robot:
-            robot.stop()
-        sys.exit(0)
-    except Exception as e:
-        print(f"Error: {e}")
-        if robot:
-            robot.stop()
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
-
-
+except Exception as e:
+    print(f"Stopping due to error: {e}")
+    robot.stop()
