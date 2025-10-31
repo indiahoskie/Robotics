@@ -1,58 +1,74 @@
-import RPi.GPIO as GPIO
-import time
+#!/usr/bin/env python3
+import time, math
+from mbot_bridge.api import MBot
 
-# Motor GPIO pins
-LEFT_MOTOR = 17
-RIGHT_MOTOR = 18
+V = 0.30           # forward speed
+KY = 1.5           # yaw P gain (start 0.8–2.0)
+WZ_MAX = 0.4       # clamp yaw correction
+DRIVE_TIME_S = 3.0
 
-# Ultrasonic sensor GPIO pins
-TRIG = 23
-ECHO = 24
+def clamp(x, lo, hi): return lo if x < lo else hi if x > hi else x
+def ang_wrap(a): 
+    # wrap angle to [-pi, pi]
+    a = (a + math.pi) % (2*math.pi) - math.pi
+    return a
 
-# Setup GPIO
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(LEFT_MOTOR, GPIO.OUT)
-GPIO.setup(RIGHT_MOTOR, GPIO.OUT)
-GPIO.setup(TRIG, GPIO.OUT)
-GPIO.setup(ECHO, GPIO.IN)
+robot = MBot()
 
-def get_distance():
-    GPIO.output(TRIG, False)
-    time.sleep(0.1)
+def read_yaw():
+    # Try common IMU interfaces: (roll, pitch, yaw) or dict/object
+    for name in ["read_imu", "readImu", "get_imu", "getImu", "imu"]:
+        if hasattr(robot, name):
+            obj = getattr(robot, name)
+            data = obj() if callable(obj) else obj
+            # normalize possible formats
+            if isinstance(data, tuple) and len(data) == 3:
+                return float(data[2])
+            if isinstance(data, dict) and "yaw" in data:
+                return float(data["yaw"])
+            if hasattr(data, "yaw"):
+                return float(data.yaw)
+    return None
 
-    GPIO.output(TRIG, True)
-    time.sleep(0.00001)
-    GPIO.output(TRIG, False)
-
-    while GPIO.input(ECHO) == 0:
-        pulse_start = time.time()
-
-    while GPIO.input(ECHO) == 1:
-        pulse_end = time.time()
-
-    pulse_duration = pulse_end - pulse_start
-    distance = pulse_duration * 17150  # Convert to cm
-    return distance
-
-def drive_forward():
-    GPIO.output(LEFT_MOTOR, True)
-    GPIO.output(RIGHT_MOTOR, True)
+def drive(vx, wz):
+    # Send velocity through whichever API exists
+    if hasattr(robot, "drive"):
+        try: robot.drive(vx, 0.0, wz)    # vx, vy, wz
+        except TypeError: robot.drive(vx, wz)  # vx, wz
+    elif hasattr(robot, "setVelocity"):
+        robot.setVelocity(vx, 0.0, wz)
+    elif hasattr(robot, "set_cmd_vel"):
+        robot.set_cmd_vel(vx, wz)
 
 def stop():
-    GPIO.output(LEFT_MOTOR, False)
-    GPIO.output(RIGHT_MOTOR, False)
+    if hasattr(robot, "stop"): robot.stop()
+    else:
+        try: drive(0.0, 0.0)
+        except: pass
 
 try:
-    while True:
-        dist = get_distance()
-        print(f"Distance: {dist:.2f} cm")
-        if dist < 30:  # Stop if object is closer than 30 cm
-            stop()
-            print("Object detected. Stopping.")
-            break
+    yaw0 = read_yaw()
+    if yaw0 is None:
+        print("No IMU yaw; falling back to simple drive.")
+        yaw_hold = False
+    else:
+        yaw_hold = True
+
+    t0 = time.time()
+    while time.time() - t0 < DRIVE_TIME_S:
+        if yaw_hold:
+            yaw = read_yaw()
+            if yaw is None: wz = 0.0
+            else:
+                err = ang_wrap(yaw - yaw0)  # deviation from initial heading
+                wz = clamp(-KY * err, -WZ_MAX, WZ_MAX)
         else:
-            drive_forward()
-        time.sleep(0.1)
+            wz = 0.0
+
+        drive(V, wz)
+        time.sleep(0.02)
 
 except KeyboardInterrupt:
-    GPIO.cleanup()
+    pass
+finally:
+    stop()
