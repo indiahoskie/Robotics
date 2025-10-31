@@ -1,196 +1,188 @@
 #!/usr/bin/env python3
-"""
-Follow Me 1D Script
-This script makes the robot maintain a setpoint distance from a wall/object in front using lidar.
-"""
-
 import time
+import math
 import numpy as np
-import sys
-import inspect
 from mbot_bridge.api import MBot
 
-# Constants
-SETPOINT   = 0.25   # meters - desired distance from wall
-TOLERANCE  = 0.05   # meters - acceptable range around setpoint
-FWD_SPEED  = 0.20   # m/s when moving forward
-REV_SPEED  = -0.20  # m/s when backing up
-LOOP_DT    = 0.10   # seconds
+# =================== TUNABLES ===================
+SETPOINT = 0.60          # meters: target distance from the wall/object in front
+TOLERANCE = 0.05         # meters: deadband to reduce oscillations
+KP = 1.2                 # proportional gain (lower if oscillates; try 0.8–1.5)
+MAX_SPEED = 0.35         # m/s cap for safety
+MIN_SPEED = 0.02         # m/s; under this we send 0 to avoid jitter
+FRONT_WINDOW = 6         # LiDAR rays near 0 rad to average
+LOSS_TIMEOUT = 1.0       # seconds: if no valid LiDAR for this long, stop
+PRINT_EVERY = 5          # print debug every N loops
+DT = 0.1                 # loop time (s) ~10 Hz
+# =================================================
 
-def get_front_range_m(ranges, thetas, window=5):
+
+# Get distance to wall
+def find_fwd_dist(ranges, thetas, window=FRONT_WINDOW):
+    """Find the distance to the nearest object in front of the robot.
+
+    Args:
+        ranges (list): The ranges from the Lidar scan.
+        thetas (list): The angles from the Lidar scan.
+        window (int, optional): The window to average ranges over. Defaults to 5.
+
+    Returns:
+        float: The distance to the nearest obstacle in front of the robot.
+               Returns np.nan if no valid rays.
     """
-    Get front range reading from lidar sensor.
-    Returns distance in meters or None if reading unavailable.
-    """
-    if not ranges or not thetas or len(ranges) == 0:
-        return None
+    # Guard against empty scans
+    if not ranges or not thetas:
+        return np.nan
 
-    # Use rays near 0 rad (front): first/last 'window' samples
-    front_ranges = np.array(ranges[:window] + ranges[-window:], dtype=float)
-    front_thetas = np.array(thetas[:window] + thetas[-window:], dtype=float)
+    # Grab the rays near the front of the scan.
+    fwd_ranges = np.array(ranges[:window] + ranges[-window:], dtype=float)
+    fwd_thetas = np.array(thetas[:window] + thetas[-window:], dtype=float)
 
-    # Valid positive distances
-    valid = front_ranges > 0
-    if not np.any(valid):
-        return None
+    # Grab just the positive values.
+    valid_idx = (np.isfinite(fwd_ranges) & (fwd_ranges > 0)).nonzero()
+    if len(valid_idx[0]) == 0:
+        return np.nan
 
-    # Forward projection on robot x-axis
-    fwd = front_ranges[valid] * np.cos(front_thetas[valid])
-    fwd = fwd[fwd > 0]  # only forward
-    if fwd.size == 0:
-        return None
+    fwd_ranges = fwd_ranges[valid_idx]
+    fwd_thetas = fwd_thetas[valid_idx]
 
-    return float(np.mean(fwd))
+    # Compute forward distances (project onto robot's forward axis).
+    fwd_dists = fwd_ranges * np.cos(fwd_thetas)
+    fwd_dists = fwd_dists[fwd_dists > 0]  # keep forward-only projections
+    if fwd_dists.size == 0:
+        return np.nan
 
-def make_set_linear(bot):
-    """
-    Return a function set_vx(vx) to command linear x only.
-    Tries drive(vx,vy,wz), then drive(vx,wz), then set_vel(v,w), then motors(l,r).
-    """
-    if hasattr(bot, "drive") and callable(getattr(bot, "drive")):
-        try:
-            n = len(inspect.signature(bot.drive).parameters)
-        except Exception:
-            n = 3
-        if n >= 3:
-            print("[INFO] Drive via bot.drive(vx, vy, wz)")
-            return lambda vx: bot.drive(float(vx), 0.0, 0.0)
-        elif n == 2:
-            print("[INFO] Drive via bot.drive(vx, wz)")
-            return lambda vx: bot.drive(float(vx), 0.0)
+    return float(np.mean(fwd_dists))  # Return the mean.
 
-    if hasattr(bot, "set_vel") and callable(getattr(bot, "set_vel")):
-        print("[INFO] Drive via bot.set_vel(v, w)")
-        return lambda vx: bot.set_vel(float(vx), 0.0)
 
-    if hasattr(bot, "motors") and callable(getattr(bot, "motors")):
-        print("[INFO] Drive via bot.motors(l, r)")
-        return lambda vx: bot.motors(float(vx), float(vx))
+# --- Small motion helpers so this works with multiple MBot APIs ---
+_last_mode = None  # remembers which command signature succeeded last time
 
-    print("[WARN] No known drive API; velocity commands will be ignored.")
-    return lambda vx: None
+def _send_vx(robot, vx):
+    """Send a forward/backward velocity command in the simplest possible way.
+       Tries drive(vx,0,0), then drive(vx,0), then motors(vx,vx)."""
+    global _last_mode
 
-def safe_stop(bot, set_vx):
+    # deadband
+    if abs(vx) < MIN_SPEED:
+        vx = 0.0
+
+    # If a mode already worked, try it first for speed
     try:
-        if hasattr(bot, "stop"):
-            bot.stop()
-            return
+        if _last_mode == "drive3":
+            robot.drive(vx, 0.0, 0.0); return "drive3"
+        elif _last_mode == "drive2":
+            robot.drive(vx, 0.0); return "drive2"
+        elif _last_mode == "motors":
+            robot.motors(vx, vx); return "motors"
+    except Exception:
+        pass  # fall through to probing
+
+    # Probe available signatures
+    try:
+        robot.drive(vx, 0.0, 0.0); _last_mode = "drive3"; return "drive3"
     except Exception:
         pass
-    set_vx(0.0)
-
-def read_lidar_pairs(bot):
-    """
-    Read lidar as (ranges, thetas).
-    - Supports read_lidar() returning tuple or dict
-    - Falls back to bot.read('lidar'/'LIDAR'/'lidar_scan'/'scan')
-    Returns (ranges, thetas) or (None, None).
-    """
-    # 1) Preferred API
-    if hasattr(bot, "read_lidar") and callable(getattr(bot, "read_lidar")):
+    try:
+        robot.drive(vx, 0.0); _last_mode = "drive2"; return "drive2"
+    except Exception:
+        pass
+    if hasattr(robot, "motors"):
         try:
-            scan = bot.read_lidar()
-            if scan is None:
-                return None, None
-            if isinstance(scan, dict):
-                ranges = scan.get('ranges') or scan.get('range')
-                thetas = scan.get('angles') or scan.get('angle')
-                return ranges, thetas
-            else:
-                try:
-                    ranges, thetas = scan
-                    return ranges, thetas
-                except Exception:
-                    return None, None
-        except Exception as e:
-            if "no data on channel" in str(e).lower():
-                return None, None
-            # fall through
+            robot.motors(vx, vx); _last_mode = "motors"; return "motors"
+        except Exception:
+            pass
 
-    # 2) Generic bus read
-    if hasattr(bot, "read") and callable(getattr(bot, "read")):
-        for ch in ("lidar", "LIDAR", "lidar_scan", "scan"):
-            try:
-                scan = bot.read(ch)
-                if scan is None:
-                    continue
-                if isinstance(scan, dict):
-                    ranges = scan.get('ranges') or scan.get('range') or scan.get('distances')
-                    thetas = scan.get('angles') or scan.get('angle')
-                    return ranges, thetas
-                else:
-                    try:
-                        ranges, thetas = scan
-                        return ranges, thetas
-                    except Exception:
-                        return None, None
-            except Exception as e:
-                if "no data on channel" in str(e).lower():
-                    return None, None
-                continue
+    return None  # no known motion API
 
-    return None, None
+def _stop_robot(robot):
+    """Stop safely regardless of which API is present."""
+    try:
+        robot.stop()
+        return
+    except Exception:
+        pass
+    # If no stop(), try zeroing whatever motion API we found
+    if _last_mode == "drive3":
+        try: robot.drive(0.0, 0.0, 0.0)
+        except Exception: pass
+    elif _last_mode == "drive2":
+        try: robot.drive(0.0, 0.0)
+        except Exception: pass
+    elif _last_mode == "motors":
+        try: robot.motors(0.0, 0.0)
+        except Exception: pass
 
-def follow_wall_loop(robot):
-    """
-    Drives forward by default. If the front distance is closer than SETPOINT,
-    back up. Stop within the tolerance band.
-    """
-    set_vx = make_set_linear(robot)
+
+# Initialize a robot object.
+robot = MBot()
+setpoint = SETPOINT  # ✅ Filled: choose setpoint above.
+
+try:
+    # Loop forever.
+    last_ok = time.time()
+    loop = 0
 
     while True:
-        ranges, thetas = read_lidar_pairs(robot)
+        # Read the latest Lidar scan.
+        try:
+            ranges, thetas = robot.read_lidar()
+        except AttributeError:
+            print("[ERROR] MBot.read_lidar() not found. Check your SDK name.")
+            break
 
-        if not ranges or not thetas:
-            # No lidar yet: hold still and retry (safer than blind driving)
-            set_vx(0.0)
-            time.sleep(LOOP_DT)
-            continue
+        # Get the distance to the wall in front of the robot.
+        dist_to_wall = find_fwd_dist(ranges, thetas)
 
-        dist = get_front_range_m(ranges, thetas)
-
-        if dist is None or not np.isfinite(dist):
-            set_vx(0.0)
-            time.sleep(LOOP_DT)
-            continue
-
-        # --- Bang-Bang behavior (1D) ---
-        if dist < SETPOINT - TOLERANCE:
-            # Too close -> back up
-            set_vx(REV_SPEED)
-            state = "BACKING"
-        elif dist > SETPOINT + TOLERANCE:
-            # Too far -> go forward
-            set_vx(FWD_SPEED)
-            state = "FORWARD"
+        # --- ✅ TODO IMPLEMENTED: Follow-me 1D P-Controller ---
+        # If LiDAR invalid for too long, stop for safety.
+        now = time.time()
+        if not (isinstance(dist_to_wall, (float, int)) and math.isfinite(dist_to_wall)):
+            # invalid reading this cycle
+            if (now - last_ok) > LOSS_TIMEOUT:
+                _stop_robot(robot)
+                if loop % PRINT_EVERY == 0:
+                    print("[WARN] No valid forward LiDAR distance; holding position.")
+                time.sleep(DT)
+                loop += 1
+                continue
         else:
-            # Within band -> stop
-            set_vx(0.0)
-            state = "STOP"
+            last_ok = now
 
-        print(f"[1D] dist={dist:.3f} m | target={SETPOINT:.3f}±{TOLERANCE:.3f} | state={state}")
-        time.sleep(LOOP_DT)
+        # Compute error so that positive error -> move forward, negative -> move back
+        # (i.e., if we're farther than desired, go forward to close the gap)
+        error = dist_to_wall - setpoint
 
-def main():
-    """Main function to run the follow 1D controller."""
-    robot = None
-    try:
-        print("Connecting to MBot...")
-        robot = MBot()
-        time.sleep(1.0)
-        print("Starting follow 1D controller...")
-        follow_wall_loop(robot)
+        # Deadband for stability
+        if abs(error) <= TOLERANCE:
+            vx_cmd = 0.0
+        else:
+            vx_cmd = KP * error
+            # Saturate speed
+            vx_cmd = max(-MAX_SPEED, min(MAX_SPEED, vx_cmd))
 
-    except KeyboardInterrupt:
-        print("\nStopping robot...")
-        if robot:
-            safe_stop(robot, make_set_linear(robot))
-        sys.exit(0)
-    except Exception as e:
-        print(f"Error: {e}")
-        if robot:
-            safe_stop(robot, make_set_linear(robot))
-        sys.exit(1)
+        # Send velocity command (adapts to available MBot API)
+        mode_used = _send_vx(robot, vx_cmd)
+        if mode_used is None:
+            print("[ERROR] No known motion API (drive/motors) available on MBot.")
+            break
 
-if __name__ == "__main__":
-    main()
+        # Debug prints every N loops
+        if loop % PRINT_EVERY == 0:
+            # Handle NaN pretty-print
+            dshow = float(dist_to_wall) if math.isfinite(dist_to_wall) else float('nan')
+            print(f"[DBG] mode={mode_used} | dist={dshow:.3f} m | set={setpoint:.3f} m | "
+                  f"err={error if math.isfinite(error) else float('nan'):.3f} | "
+                  f"vx={vx_cmd:.3f} m/s")
+
+        # Optionally, sleep for a bit before reading a new scan.
+        time.sleep(DT)
+        loop += 1
+
+except KeyboardInterrupt:
+    print("\n[INFO] CTRL-C received, stopping.")
+except Exception as e:
+    print(f"[ERROR] Exception: {e}")
+finally:
+    _stop_robot(robot)
+    print("[INFO] Robot stopped.")
