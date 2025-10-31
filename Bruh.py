@@ -1,89 +1,29 @@
-#!/usr/bin/env python3
-"""
-Follow Me 1D Script
-This script makes the robot maintain a setpoint distance from a wall/object in front using lidar.
-"""
-
-import time
-import numpy as np
-import sys
-from mbot_bridge.api import MBot
-
 # Constants
-SETPOINT = 0.25       # meters - desired distance from wall
-TOLERANCE = 0.05      # meters - acceptable range around setpoint
-FORWARD_SPEED = 0.2   # m/s
-BACKWARD_SPEED = -0.2 # m/s
+TARGET_DISTANCE = 50  # Target distance in cm
+KP = 0.5  # Proportional gain
 
-def get_front_range_m(ranges, thetas, window=10):
-    """
-    Get front range reading from lidar sensor.
-    Returns distance in meters or None if reading unavailable.
-    """
-    if not ranges or not thetas or len(ranges) != len(thetas):
-        return None
+# Simulated sensor reading (distance to target in cm)
+current_distance = 100
 
-    # Use rays near 0 degrees (front of robot)
-    front_ranges = np.array(ranges[:window] + ranges[-window:])
-    front_thetas = np.array(thetas[:window] + thetas[-window:])
+# Control loop
+while True:
+    # Calculate error
+    error = TARGET_DISTANCE - current_distance
 
-    # Filter out invalid readings
-    valid = front_ranges > 0.05
-    if not np.any(valid):
-        return None
+    # Calculate control signal (speed)
+    speed = KP * error
 
-    front_ranges = front_ranges[valid]
-    front_thetas = front_thetas[valid]
+    # Clamp speed to a maximum/minimum value
+    speed = max(min(speed, 100), -100)
 
-    # Project distances forward
-    forward_distances = front_ranges * np.cos(front_thetas)
-    return np.mean(forward_distances)
+    # Simulate robot movement (update current distance)
+    current_distance -= speed * 0.1  # Adjust factor for simulation
 
-def follow_wall_loop(robot):
-    """
-    Follow controller using lidar sensor: maintains setpoint distance from wall/object.
-    """
-    while True:
-        ranges, thetas = robot.read_lidar()
-        dist = get_front_range_m(ranges, thetas)
+    # Print status
+    print(f"Error: {error}, Speed: {speed}, Current Distance: {current_distance}")
 
-        if dist is None:
-            print("No valid lidar data. Stopping.")
-            robot.stop()
-            time.sleep(0.2)
-            continue
+    # Break condition for simulation
+    if abs(error) < 1:
+        print("Target reached!")
+        break
 
-        print(f"Distance to wall: {dist:.2f} m")
-
-        if dist < SETPOINT - TOLERANCE:
-            robot.drive(BACKWARD_SPEED, 0.0, 0.0)
-        elif dist > SETPOINT + TOLERANCE:
-            robot.drive(FORWARD_SPEED, 0.0, 0.0)
-        else:
-            robot.stop()
-
-        time.sleep(0.1)
-
-def main():
-    """Main function to run the follow 1D controller."""
-    robot = None
-    try:
-        print("Connecting to mbot...")
-        robot = MBot()
-        time.sleep(1)
-        print("Starting follow 1D controller...")
-        follow_wall_loop(robot)
-
-    except KeyboardInterrupt:
-        print("\nStopping robot...")
-        if robot:
-            robot.stop()
-        sys.exit(0)
-    except Exception as e:
-        print(f"Error: {e}")
-        if robot:
-            robot.stop()
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
