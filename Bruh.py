@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Follow Me 1D Script
-This script makes the robot maintain a setpoint distance from a wall/object in front using lidar.
+Improved Follow Me 1D Script
+Maintains a setpoint distance from an object using lidar.
 """
 
 import time
@@ -10,32 +10,39 @@ import sys
 from mbot_bridge.api import MBot
 
 # Constants
-SETPOINT = 0.25  # Desired distance from object (meters)
-TOLERANCE = 0.05  # Acceptable range around setpoint (meters)
+SETPOINT = 0.25      # Desired distance from object (meters)
+TOLERANCE = 0.05     # Acceptable range around setpoint (meters)
+FORWARD_SPEED = 0.3  # Forward speed (m/s)
+BACKWARD_SPEED = -0.3  # Backward speed (m/s)
 
 def get_front_range_m(ranges, thetas):
     """
-    Get front range reading from lidar sensor.
-    Returns distance in meters or None if reading unavailable.
+    Get average front-facing lidar distance using ±15° window.
     """
-    if not ranges or not thetas or len(ranges) == 0:
+    if not ranges or not thetas or len(ranges) != len(thetas):
         return None
 
-    # Use a small window around 0 degrees (front of robot)
-    window = 5
-    front_ranges = ranges[:window] + ranges[-window:]
-    front_thetas = thetas[:window] + thetas[-window:]
+    # Convert to numpy arrays
+    ranges = np.array(ranges)
+    thetas = np.array(thetas)
 
-    valid_distances = []
-    for i, dist in enumerate(front_ranges):
-        if dist > 0:
-            fwd_dist = dist * np.cos(front_thetas[i])
-            valid_distances.append(fwd_dist)
+    # Filter for angles within ±15° (≈0.26 rad)
+    angle_window = 0.26
+    mask = np.abs(thetas) < angle_window
+    front_ranges = ranges[mask]
+    front_thetas = thetas[mask]
 
-    if not valid_distances:
+    # Filter out invalid readings
+    valid = front_ranges > 0.05  # ignore zero or very small readings
+    front_ranges = front_ranges[valid]
+    front_thetas = front_thetas[valid]
+
+    if len(front_ranges) == 0:
         return None
 
-    return np.mean(valid_distances)
+    # Project distances forward
+    forward_distances = front_ranges * np.cos(front_thetas)
+    return np.mean(forward_distances)
 
 def follow_wall_loop(robot):
     """
@@ -46,16 +53,17 @@ def follow_wall_loop(robot):
         dist = get_front_range_m(ranges, thetas)
 
         if dist is None:
+            print("No valid lidar data. Stopping.")
             robot.stop()
             time.sleep(0.2)
             continue
 
-        print(f"Front distance: {dist:.2f} m")  # Debug output
+        print(f"Front distance: {dist:.2f} m")
 
         if dist < SETPOINT - TOLERANCE:
-            robot.drive(-0.2, 0.0, 0.0)  # Backward
+            robot.drive(BACKWARD_SPEED, 0.0, 0.0)
         elif dist > SETPOINT + TOLERANCE:
-            robot.drive(0.2, 0.0, 0.0)  # Forward
+            robot.drive(FORWARD_SPEED, 0.0, 0.0)
         else:
             robot.stop()
 
