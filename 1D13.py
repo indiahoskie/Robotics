@@ -1,36 +1,58 @@
-#!/usr/bin/env python3
-import rospy
-from geometry_msgs.msg import Twist
-from sensor_msgs.msg import Range  # For ultrasonic; use LaserScan for LiDAR
+import RPi.GPIO as GPIO
+import time
 
-class StraightDrive:
-    def __init__(self):
-        rospy.init_node('straight_drive_stop')
-        self.cmd_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
-        rospy.Subscriber('/distance_sensor', Range, self.sensor_callback)
-        self.safe_distance = 0.5  # meters
-        self.object_detected = False
-        self.rate = rospy.Rate(10)
+# Motor GPIO pins
+LEFT_MOTOR = 17
+RIGHT_MOTOR = 18
 
-    def sensor_callback(self, data):
-        if data.range < self.safe_distance:
-            self.object_detected = True
+# Ultrasonic sensor GPIO pins
+TRIG = 23
+ECHO = 24
 
-    def drive(self):
-        move_cmd = Twist()
-        move_cmd.linear.x = 0.2  # Forward speed
+# Setup GPIO
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(LEFT_MOTOR, GPIO.OUT)
+GPIO.setup(RIGHT_MOTOR, GPIO.OUT)
+GPIO.setup(TRIG, GPIO.OUT)
+GPIO.setup(ECHO, GPIO.IN)
 
-        while not rospy.is_shutdown():
-            if self.object_detected:
-                move_cmd.linear.x = 0.0
-                rospy.loginfo("Object detected. Stopping.")
-            self.cmd_pub.publish(move_cmd)
-            self.rate.sleep()
+def get_distance():
+    GPIO.output(TRIG, False)
+    time.sleep(0.1)
 
-if __name__ == '__main__':
-    try:
-        robot = StraightDrive()
-        robot.drive()
-    except rospy.ROSInterruptException:
-        pass
+    GPIO.output(TRIG, True)
+    time.sleep(0.00001)
+    GPIO.output(TRIG, False)
 
+    while GPIO.input(ECHO) == 0:
+        pulse_start = time.time()
+
+    while GPIO.input(ECHO) == 1:
+        pulse_end = time.time()
+
+    pulse_duration = pulse_end - pulse_start
+    distance = pulse_duration * 17150  # Convert to cm
+    return distance
+
+def drive_forward():
+    GPIO.output(LEFT_MOTOR, True)
+    GPIO.output(RIGHT_MOTOR, True)
+
+def stop():
+    GPIO.output(LEFT_MOTOR, False)
+    GPIO.output(RIGHT_MOTOR, False)
+
+try:
+    while True:
+        dist = get_distance()
+        print(f"Distance: {dist:.2f} cm")
+        if dist < 30:  # Stop if object is closer than 30 cm
+            stop()
+            print("Object detected. Stopping.")
+            break
+        else:
+            drive_forward()
+        time.sleep(0.1)
+
+except KeyboardInterrupt:
+    GPIO.cleanup()
